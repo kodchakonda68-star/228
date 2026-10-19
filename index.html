@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR กบข้ามถนน (AR Frogger)</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: 'Kanit', sans-serif;
+            background-color: #1a202c;
+            color: white;
+            overflow: hidden; /* Prevent scrolling */
+        }
+        
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #webcam-video {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror video */
+            z-index: 1;
+        }
+
+        #gameCanvas {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror canvas to match video */
+            z-index: 2;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none; /* Let clicks pass through to canvas if needed */
+        }
+
+        .pointer-events-auto {
+            pointer-events: auto;
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <!-- Background Video from Webcam -->
+        <video id="webcam-video" autoplay playsinline></video>
+        
+        <!-- Game Graphics -->
+        <canvas id="gameCanvas"></canvas>
+
+        <!-- UI Overlay -->
+        <div id="ui-layer" class="flex flex-col justify-between p-6">
+            <!-- Header: Score & Info -->
+            <div class="flex justify-between items-start pointer-events-auto">
+                <div class="glass-panel p-4 rounded-2xl shadow-lg">
+                    <h1 class="text-2xl font-bold text-green-400"><i class="fa-solid fa-frog"></i> AR Frogger</h1>
+                    <p class="text-sm text-gray-300">กระโดดหน้ากล้องเพื่อให้กบเดินหน้า!</p>
+                </div>
+                <div class="glass-panel p-4 rounded-2xl shadow-lg text-center min-w-[120px]">
+                    <div class="text-sm text-gray-400 uppercase font-bold">คะแนน</div>
+                    <div id="score-display" class="text-4xl font-bold text-yellow-400">0</div>
+                </div>
+            </div>
+
+            <!-- Loading & Start Menu -->
+            <div id="menu-overlay" class="absolute inset-0 bg-black/80 flex flex-col items-center justify-center pointer-events-auto z-50 transition-opacity duration-500">
+                <div class="text-6xl mb-6 pulse">🐸</div>
+                <h2 class="text-4xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-green-400 to-blue-500">ภารกิจกบข้ามถนน</h2>
+                
+                <div id="loading-status" class="text-xl text-yellow-300 mb-8 flex items-center gap-2">
+                    <i class="fa-solid fa-spinner fa-spin"></i> กำลังโหลดระบบ AI ตรวจจับท่าทาง...
+                </div>
+
+                <button id="start-btn" class="hidden bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-10 rounded-full text-2xl shadow-[0_6px_0_#166534] active:shadow-none active:translate-y-[6px] transition-all">
+                    เริ่มเล่นเกม <i class="fa-solid fa-play ml-2"></i>
+                </button>
+                
+                <div class="mt-8 text-center text-gray-400 max-w-md bg-white/10 p-4 rounded-xl">
+                    <i class="fa-solid fa-person-arrow-up-from-line text-2xl mb-2 text-white"></i>
+                    <p>ถอยห่างจากกล้องให้เห็นช่วงบนของร่างกาย</p>
+                    <p>ทำท่า <strong>"กระโดด"</strong> ขยับตัวขึ้นลงเร็วๆ เพื่อให้กบเดินหน้า</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Message Toast -->
+    <div id="toast" class="fixed bottom-10 left-1/2 transform -translate-x-1/2 bg-red-500 text-white px-6 py-3 rounded-full font-bold text-xl opacity-0 transition-opacity duration-300 z-50 pointer-events-none shadow-lg">
+        โดนชน! กลับจุดเริ่มต้น
+    </div>
+
+    <script>
+        // Web Audio API for sound effects (No external files needed)
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new AudioContext();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        function playTone(freq, type, duration, vol=0.1, slideFreq=null) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            if (slideFreq) {
+                osc.frequency.exponentialRampToValueAtTime(slideFreq, audioCtx.currentTime + duration);
+            }
+            
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        const Sound = {
+            jump: () => playTone(300, 'sine', 0.2, 0.2, 600), // Low to high boing
+            hit: () => {
+                playTone(150, 'sawtooth', 0.3, 0.2, 50);
+                playTone(100, 'square', 0.4, 0.2, 30);
+            },
+            win: () => {
+                playTone(400, 'sine', 0.1, 0.1);
+                setTimeout(() => playTone(600, 'sine', 0.2, 0.1), 100);
+                setTimeout(() => playTone(800, 'sine', 0.3, 0.1), 250);
+            }
+        };
+
+        const videoElement = document.getElementById('webcam-video');
+        const canvasElement = document.getElementById('gameCanvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const scoreDisplay = document.getElementById('score-display');
+        const menuOverlay = document.getElementById('menu-overlay');
+        const startBtn = document.getElementById('start-btn');
+        const loadingStatus = document.getElementById('loading-status');
+        const toast = document.getElementById('toast');
+
+        // Game State
+        let gameRunning = false;
+        let score = 0;
+        let lanes = 10;
+        let laneHeight = 0;
+        
+        // Entity configurations
+        const CAR_EMOJIS = ['🚗', '🚙', '🚕', '🚓', '🚌', '🚚'];
+        let frog = { x: 0, y: 0, size: 40, row: 0 };
+        let cars = [];
+
+        // Motion Tracking Variables
+        let prevNoseY = null;
+        let jumpCooldown = 0;
+        let poseLandmarks = null; // Store for rendering
+
+        function resizeCanvas() {
+            // Set canvas size to match video intrinsic size for 1:1 mapping
+            if (videoElement.videoWidth) {
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+                laneHeight = canvasElement.height / lanes;
+                frog.size = Math.min(laneHeight * 0.8, 60); // Responsive frog size
+                
+                // Keep frog at bottom if not playing yet
+                if (!gameRunning && frog.row === 0) {
+                    resetFrog();
+                }
+            }
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+
+        function initCars() {
+            cars = [];
+            // Generate cars for lanes 1 to 8 (0 is start, 9 is win)
+            for (let i = 1; i < lanes - 1; i++) {
+                let speed = (Math.random() * 2 + 2) * (canvasElement.width / 800); // Scale speed by width
+                let direction = i % 2 === 0 ? 1 : -1; // Alternate directions
+                let numCars = Math.floor(Math.random() * 2) + 1; // 1 or 2 cars per lane
+                
+                for(let c=0; c<numCars; c++) {
+                    cars.push({
+                        x: Math.random() * canvasElement.width,
+                        y: canvasElement.height - (i * laneHeight) - (laneHeight / 2),
+                        speed: speed * direction,
+                        size: frog.size * 1.2,
+                        emoji: CAR_EMOJIS[Math.floor(Math.random() * CAR_EMOJIS.length)]
+                    });
+                }
+            }
+        }
+
+        function resetFrog() {
+            frog.x = canvasElement.width / 2;
+            frog.row = 0;
+            frog.y = canvasElement.height - (laneHeight / 2);
+        }
+
+        function showToast(msg, isWin = false) {
+            toast.innerText = msg;
+            toast.className = `fixed bottom-10 left-1/2 transform -translate-x-1/2 px-6 py-3 rounded-full font-bold text-xl transition-opacity duration-300 z-50 shadow-lg ${isWin ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`;
+            toast.style.opacity = 1;
+            setTimeout(() => toast.style.opacity = 0, 1500);
+        }
+
+        function attemptJump() {
+            if (!gameRunning) return;
+            
+            frog.row++;
+            frog.y -= laneHeight;
+            Sound.jump();
+
+            // Check Win condition (reached top lane)
+            if (frog.row >= lanes - 1) {
+                score++;
+                scoreDisplay.innerText = score;
+                Sound.win();
+                showToast("เยี่ยมมาก! +1 คะแนน", true);
+                resetFrog();
+                initCars(); // Respawn cars to make it dynamic
+            }
+        }
+
+        function checkCollisions() {
+            const hitRadius = frog.size * 0.4; // forgiving hit box
+            
+            for (let car of cars) {
+                // Simple distance-based collision
+                let dx = frog.x - car.x;
+                let dy = frog.y - car.y;
+                let distance = Math.sqrt(dx*dx + dy*dy);
+                
+                if (distance < hitRadius + (car.size * 0.4)) {
+                    Sound.hit();
+                    showToast("โดนชน! พยายามใหม่นะ");
+                    // Flash screen red effect could be added here
+                    resetFrog();
+                    break;
+                }
+            }
+        }
+
+        function gameLoop() {
+            // Clear canvas to let video show through
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (gameRunning && canvasElement.width > 0) {
+                // 1. Draw Safe Zones (Start & End)
+                canvasCtx.fillStyle = 'rgba(34, 197, 94, 0.3)'; // Green tint
+                canvasCtx.fillRect(0, canvasElement.height - laneHeight, canvasElement.width, laneHeight); // Start
+                canvasCtx.fillStyle = 'rgba(234, 179, 8, 0.3)'; // Yellow tint
+                canvasCtx.fillRect(0, 0, canvasElement.width, laneHeight); // End (Win)
+
+                // 2. Update and Draw Cars
+                canvasCtx.textAlign = 'center';
+                canvasCtx.textBaseline = 'middle';
+                
+                for (let car of cars) {
+                    // Update position
+                    car.x += car.speed;
+                    
+                    // Wrap around screen
+                    if (car.speed > 0 && car.x > canvasElement.width + car.size) {
+                        car.x = -car.size;
+                    } else if (car.speed < 0 && car.x < -car.size) {
+                        car.x = canvasElement.width + car.size;
+                    }
+
+                    // Draw Car Emoji (Flip if going left)
+                    canvasCtx.font = `${car.size}px Arial`;
+                    canvasCtx.save();
+                    canvasCtx.translate(car.x, car.y);
+                    // Since canvas is mirrored via CSS scaleX(-1), drawing normally makes text backward.
+                    // We must mirror it back in canvas context to look correct to user!
+                    canvasCtx.scale(-1, 1); 
+                    if (car.speed < 0) {
+                        canvasCtx.scale(-1, 1); // Flip car to face direction
+                    }
+                    canvasCtx.fillText(car.emoji, 0, 0);
+                    canvasCtx.restore();
+                }
+
+                // 3. Draw Frog
+                canvasCtx.font = `${frog.size}px Arial`;
+                canvasCtx.save();
+                canvasCtx.translate(frog.x, frog.y);
+                canvasCtx.scale(-1, 1); // Mirror back so emoji faces correctly
+                canvasCtx.fillText('🐸', 0, 0);
+                canvasCtx.restore();
+
+                // 4. Draw AR Pose Tracking (Nose point for visual feedback)
+                if (poseLandmarks) {
+                    const nose = poseLandmarks[0]; // Nose landmark
+                    if (nose && nose.visibility > 0.5) {
+                        const nx = nose.x * canvasElement.width;
+                        const ny = nose.y * canvasElement.height;
+                        
+                        // Draw a target reticle on nose
+                        canvasCtx.beginPath();
+                        canvasCtx.arc(nx, ny, 10, 0, 2 * Math.PI);
+                        canvasCtx.lineWidth = 3;
+                        canvasCtx.strokeStyle = jumpCooldown > 0 ? 'red' : 'cyan';
+                        canvasCtx.stroke();
+                        
+                        // Draw guiding text near nose
+                        canvasCtx.save();
+                        canvasCtx.translate(nx, ny - 20);
+                        canvasCtx.scale(-1, 1); // unmirror text
+                        canvasCtx.font = "14px Kanit";
+                        canvasCtx.fillStyle = "white";
+                        canvasCtx.fillText(jumpCooldown > 0 ? "รอแป๊บ..." : "กระโดด!", 0, 0);
+                        canvasCtx.restore();
+                    }
+                }
+
+                // 5. Logic Updates
+                checkCollisions();
+                if (jumpCooldown > 0) jumpCooldown--;
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults((results) => {
+            // This callback runs every time the camera processes a frame
+            if (results.poseLandmarks) {
+                poseLandmarks = results.poseLandmarks;
+                const nose = results.poseLandmarks[0];
+                
+                // Track nose Y coordinate to detect jumping
+                // In image coordinates, Y=0 is top, Y=1 is bottom.
+                // A jump means Y decreases rapidly.
+                if (nose && nose.visibility > 0.6) {
+                    const currentY = nose.y;
+                    
+                    if (prevNoseY !== null) {
+                        const deltaY = prevNoseY - currentY;
+                        
+                        // If deltaY is positive and large enough, it's an upward movement
+                        const jumpThreshold = 0.04; // Adjust sensitivity here
+                        
+                        if (deltaY > jumpThreshold && jumpCooldown <= 0) {
+                            attemptJump();
+                            jumpCooldown = 15; // Frames to wait before allowing next jump
+                        }
+                    }
+                    
+                    // Simple smoothing (Exponential Moving Average)
+                    if (prevNoseY === null) {
+                        prevNoseY = currentY;
+                    } else {
+                        prevNoseY = (prevNoseY * 0.7) + (currentY * 0.3);
+                    }
+                }
+            } else {
+                poseLandmarks = null;
+            }
+        });
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }
+                });
+                videoElement.srcObject = stream;
+                
+                return new Promise((resolve) => {
+                    videoElement.onloadedmetadata = () => {
+                        resizeCanvas();
+                        resolve();
+                    };
+                });
+            } catch (err) {
+                console.error("Camera access denied or failed", err);
+                loadingStatus.innerHTML = '<i class="fa-solid fa-triangle-exclamation text-red-500"></i> ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตให้ใช้งานกล้อง';
+                loadingStatus.classList.replace('text-yellow-300', 'text-red-400');
+            }
+        }
+
+        // Initialize MediaPipe Camera utility to feed video to Pose model
+        async function startApp() {
+            await setupCamera();
+            
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await pose.send({image: videoElement});
+                },
+                width: 1280,
+                height: 720
+            });
+            
+            camera.start().then(() => {
+                // AI Model loaded and running
+                loadingStatus.classList.add('hidden');
+                startBtn.classList.remove('hidden');
+            });
+        }
+
+        // Button Event Listener
+        startBtn.addEventListener('click', () => {
+            initAudio(); // Requires user interaction
+            menuOverlay.classList.add('opacity-0');
+            setTimeout(() => {
+                menuOverlay.classList.add('hidden');
+                initCars();
+                resetFrog();
+                gameRunning = true;
+                Sound.jump(); // Play start sound
+            }, 500);
+        });
+
+        // Start systems
+        startApp();
+        requestAnimationFrame(gameLoop);
+
+    </script>
+</body>
+</html>
